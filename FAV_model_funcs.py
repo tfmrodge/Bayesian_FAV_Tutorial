@@ -49,11 +49,14 @@ def loaddata(DV):
             #The number of values will be labelled colname_NumVals e.g. 'LogKOW_NumVals'
             colname = colnames[i]+str('_NumVals') 
             uDV.loc[:,colname] = DV.iloc[:,idx+startcol+2] #Column where number of values is stored
+            uDV.loc[uDV.loc[:,colname]==0,colname]=0.5
             i+=1
     #We will also make numvals for dUa, Sa, Kowd
     uDV.loc[:,'dUA_NumVals'] = uDV.loc[:,'dVAPH_NumVals']
     uDV.loc[:,'LogSA_NumVals'] = uDV.loc[:,'LogPL_NumVals']
     uDV.loc[:,'LogKOWd_NumVals'] = uDV.loc[:,'LogKOW_NumVals']
+    #mask = [uDV.loc[:,'dUA_NumVals':'LogKOWd_NumVals']==0]
+    #uDV.loc[mask,'dUA_NumVals':'LogKOWd_NumVals'] = 0.5
     #Next, we will convert our vapour pressures to a solubility: Sa = VP/RT
     R = 8.314 #J/molK, ideal gas constant
     T = 298.15 #K, temperature
@@ -223,7 +226,7 @@ def setup_model(comp,uDV,model_type = 'KS'):
     return X, base_sd    
 
     
-def define_model(comp,uDV,X=None,base_sd=None,model_type = 'KS'):
+def define_model(comp,uDV,X=None,base_sd=None,model_type = 'KS',**kwargs):
     '''
     This function will define the Bayesian model to harmonize compound dU or KS values.
     
@@ -235,6 +238,8 @@ def define_model(comp,uDV,X=None,base_sd=None,model_type = 'KS'):
         X = input matrix for Bayesian model
         base_sd = base standard deviation for compound, used as an input for the Bayesian model
         model_type = 'dU' or 'KS'.
+        **kwargs contains additional optional arguments that can be passed to the model. In this case,
+        we are using kwargs to define what distribution we want for a particular 
     Output:
         enth_model = pyMC3 model object for the enthalpies. This is used to run the trace.
     See Rodgers et al. (2021) for full details on model paramaterization.
@@ -257,7 +262,7 @@ def define_model(comp,uDV,X=None,base_sd=None,model_type = 'KS'):
     else: 
         varnames = ['LogSA','LogSW','LogSO','LogKAW','LogKOWd','LogKOA']
         unilow = [-10,-10,-10,-10,-10,-10]
-        unihi = [10,10,10,10,10,10]
+        unihi = [20,20,20,20,20,20]
         #The KS sigmatest value is set at 0.01 as that led to a good balance of accuracy and model speed.
         sigmatest = 0.01   
     #Define the model in pyMC3
@@ -271,12 +276,24 @@ def define_model(comp,uDV,X=None,base_sd=None,model_type = 'KS'):
         #and the standard deviation of the DVs as the standard deviation, subject to a minimum derived from base_SD. To adjust the priors,
         #read the pymc3 documentation about what distributions are available and then change this code.
         for props in presprops:
+            #Check if the property has a different distribution, as defined elsewhere. Need to add these manually
+            if varnames[props] in kwargs.keys():
+                if kwargs[varnames[props]] == 'Lognormal':
+                    beta[props] = pm.Lognormal(varnames[props], mu = np.log(uDV.loc[comp,varnames[props]].n),\
+                        sigma=2*max(base_sd/uDV.loc[comp,varnames[props]+'_NumVals'],uDV.loc[comp,varnames[props]].s))
+                elif kwargs[varnames[props]] == 'SkewNormal':
+                    beta[props] = pm.SkewNormal(varnames[props], mu = uDV.loc[comp,varnames[props]].n,\
+                        sigma=2*max(base_sd/uDV.loc[comp,varnames[props]+'_NumVals'],uDV.loc[comp,varnames[props]].s),
+                        alpha = 1.)#alpha Chosen by professional judgement
+            
             #See if the property is present. If not, give it a uniform distribution.
-            if unumpy.isnan(uDV.loc[comp,varnames[props]]):
+            #print(varnames[props])
+            elif uDV.loc[comp,varnames[props]+'_absent'] == True:
                 beta[props] = pm.Uniform(varnames[props], lower = unilow[props], upper = unihi[props])
             else: #Otherwise, the DV is the prior in a normal distribution.
                 beta[props] = pm.Normal(varnames[props], mu = uDV.loc[comp,varnames[props]].n,\
                             sigma=max(base_sd/uDV.loc[comp,varnames[props]+'_NumVals'],uDV.loc[comp,varnames[props]].s))
+                            #testval=np.array([uDV.loc[comp,varnames[props]].n])) #Added this line 20220204 to fix an initialization problem
         epsilon = np.dot(X,beta) #This gives us the misclosure error for each of the three equations
         #The model tries to fit to an observation, in this case that the misclosure should be 0.
         #We add the sum of squared errors to ensure that we don't over-fit to one equation.
@@ -286,7 +303,8 @@ def define_model(comp,uDV,X=None,base_sd=None,model_type = 'KS'):
         Y_obs = pm.StudentT('Y_obs',nu = len(beta)-1, mu=mu, sigma=sigma, observed=0)
     return FAV_model
     
-def run_model(comp,FAVs,uDV=None,bayes_model = None,model_type ='KS',savepath = 'Traces/', trace=10000,tune=10000,chains=5,cores=5,target_accept=0.9,max_treedepth = 15):
+def run_model(comp,FAVs,uDV=None,bayes_model = None,model_type ='KS',savepath = 'Traces/',
+              trace=10000,tune=10000,chains=5,cores=5,target_accept=0.9,max_treedepth = 15,**kwargs):
     '''
     This function run the Bayesian model using the NUTS sampler, then saves the output FAVs to the FAVs input.
     It will accept either the dU or the Bayesian model, as "enth_model"
@@ -316,12 +334,15 @@ def run_model(comp,FAVs,uDV=None,bayes_model = None,model_type ='KS',savepath = 
     #pdb.set_trace()
     #First, initialize the desired model type if bayes_model is not provided. 
     if (bayes_model == None):
-        bayes_model = define_model(comp,uDV,model_type=model_type)
+        bayes_model = define_model(comp,uDV,model_type=model_type,**kwargs)
 
         #bayes_model = define_KSmodel(comp,uDV,FAVs)
     #Then, all we do is run it
     with bayes_model:
-        FAV_trace = pm.sample(trace,tune=tune,chains=chains,cores=cores,target_accept=target_accept,max_treedepth=max_treedepth)
+        #start={'sigma':np.array([0.]),
+        FAV_trace = pm.sample(trace,tune=tune,chains=chains,cores=cores,
+                              target_accept=target_accept,
+                              max_treedepth=max_treedepth,return_inferencedata=False)
     #Output the FAVs to the FAV datafile
     FAVs = trace_to_FAVs(comp,FAVs,FAV_trace = FAV_trace)
     #Save the trace - this tutorial uses a folder called "Traces" and saves with the compound 
@@ -335,7 +356,8 @@ def run_model(comp,FAVs,uDV=None,bayes_model = None,model_type ='KS',savepath = 
     
     return FAVs, FAV_trace
 
-def plot_trace(comp,FAVs,FAV_trace=None,filename=None,bayes_model=None,uDV=None,model_type = 'KS',summary=True):
+def plot_trace(comp,FAVs,FAV_trace=None,filename=None,bayes_model=None,uDV=None,
+               model_type = 'KS',summary=True,fig=True,**kwargs):
     '''
     This function display the results of a trace, using the trace as an input or a filename specifying a trace.
     To load a trace you need to havea model defined, if no model is defined we will generate a model for that compound
@@ -364,21 +386,25 @@ def plot_trace(comp,FAVs,FAV_trace=None,filename=None,bayes_model=None,uDV=None,
     if FAV_trace == None:
         #Check if a model was given & what type. Define the model if necessary.
         if (bayes_model == None):
-            bayes_model = define_model(comp,uDV,model_type=model_type)      
+            bayes_model = define_model(comp,uDV,model_type=model_type,**kwargs)      
         FAV_trace = pm.load_trace(filename,bayes_model)
 
     #The traceplot displays a graph of the poseteriors for each chain and the traceplots
-    pm.traceplot(FAV_trace);
-    #To give the figure a title need to obtain figure name and then define title
-    fig = plt.gcf();
-    fig.suptitle(comp, fontsize=16)
-    #If we want to display the summary table, display it
-    if summary == True:
-        tracesumm = pm.summary(FAV_trace)
-    
+    with bayes_model:
+        if fig == True:
+            pm.traceplot(FAV_trace);
+            #To give the figure a title need to obtain figure name and then define title
+            fig = plt.gcf();
+            fig.suptitle(comp, fontsize=16)
+        else:
+            fig = None
+        #If we want to display the summary table, display it
+        if summary == True:
+            tracesumm = pm.summary(FAV_trace)
+
     return fig, tracesumm
     
-def trace_to_FAVs(comp,FAVs,FAV_trace=None,filename=None,bayes_model=None,uDV=None,model_type = 'KS'):
+def trace_to_FAVs(comp,FAVs,FAV_trace=None,filename=None,bayes_model=None,uDV=None,model_type = 'KS',**kwargs):
     '''
     This function puts the trace outputs in the FAVs dataframe, using the trace as an input or a filename specifying a trace.
     To load a trace you need to havea model defined, if no model is defined we will generate a model for that compound
@@ -403,7 +429,7 @@ def trace_to_FAVs(comp,FAVs,FAV_trace=None,filename=None,bayes_model=None,uDV=No
     if FAV_trace == None:
         #Check if a model was given & what type. Define the model if necessary.
         if (bayes_model == None):
-            bayes_model = define_model(comp,uDV,model_type=model_type)         
+            bayes_model = define_model(comp,uDV,model_type=model_type,**kwargs)         
         FAV_trace = pm.load_trace(filename,bayes_model)
     #Define the variable names for the loop    
     dUnames = ['dUA','dUW','dUO','dUAW','dUOW','dUOA']
