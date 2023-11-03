@@ -258,7 +258,7 @@ def setup_model(comp,uDV,model_type = 'KS'):
     return X, base_sd    
 
     
-def define_model(comp,uDV,X=None,base_sd=None,model_type = 'KS'):
+def define_model(comp,uDV,X=None,base_sd=None,model_type = 'KS',sigmatest=None):
     '''
     This function will define the Bayesian model to harmonize dU or KS values.
     
@@ -294,14 +294,16 @@ def define_model(comp,uDV,X=None,base_sd=None,model_type = 'KS'):
         unihi = [200,100,100,150,100,0]
         #The dU value is set at 0.1 as that led to a good balance of accuracy 
         #and model speed.
-        sigmatest = 0.1
+        if sigmatest == None:
+            sigmatest = 0.1
     else: 
         varnames = ['LogSA','LogSW','LogSO','LogKAW','LogKOWd','LogKOA']
         unilow = [-10,-10,-10,-10,-10,-10]
         unihi = [10,10,10,10,10,10]
         #The KS sigmatest value is set at 0.01 as that led to a good balance 
         #of accuracy and model speed.
-        sigmatest = 0.01   
+        if sigmatest == None:
+            sigmatest =  0.01   
     #Define the model in pyMC3
     FAV_model = pm.Model()    
     with FAV_model:
@@ -336,7 +338,7 @@ def define_model(comp,uDV,X=None,base_sd=None,model_type = 'KS'):
                             sigma=sigma, observed=0)
     return FAV_model
     
-def run_model(comp,FAVs,uDV=None,bayes_model = None,model_type ='KS',
+def run_model(comp,FAVs,uDV=None,bayes_model = None,model_type ='KS',sigmatest=None,
               savepath = 'Traces/', trace=10000,tune=10000,chains=5,cores=2,
               target_accept=0.9,max_treedepth = 15):
     '''
@@ -380,7 +382,7 @@ def run_model(comp,FAVs,uDV=None,bayes_model = None,model_type ='KS',
     #pdb.set_trace()
     #First, initialize the desired model type if bayes_model is not provided. 
     if (bayes_model == None):
-        bayes_model = define_model(comp,uDV,model_type=model_type)
+        bayes_model = define_model(comp,uDV,model_type=model_type,sigmatest=sigmatest)
 
         #bayes_model = define_KSmodel(comp,uDV,FAVs)
     #Then, all we do is run it
